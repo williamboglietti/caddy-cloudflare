@@ -1,0 +1,92 @@
+name: build
+
+# Déclenché par un tag git de version (ex: v2.11.4).
+# Le tag dicte la version de Caddy buildée : v2.11.4 -> CADDY_VERSION=2.11.4.
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  IMAGE_DOCKERHUB: williamboglietti/caddy-cloudflare
+  IMAGE_GHCR: ghcr.io/williamboglietti/caddy-cloudflare
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # nécessaire pour pousser sur GHCR
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # v2.11.4 -> 2.11.4 (build-arg passé à xcaddy via le Dockerfile)
+      - name: Derive Caddy version from tag
+        id: version
+        run: echo "caddy=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # --- Smoke test : on build amd64 en local et on PROUVE que le module est embarqué.
+      # Si le grep échoue, le job s'arrête ici : rien n'est poussé.
+      - name: Build amd64 for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: caddy-cloudflare:smoketest
+          build-args: |
+            CADDY_VERSION=${{ steps.version.outputs.caddy }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify cloudflare module is present
+        run: docker run --rm caddy-cloudflare:smoketest caddy list-modules | grep -q dns.providers.cloudflare
+
+      # --- Login uniquement après que le smoke test soit passé.
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE_DOCKERHUB }}
+            ${{ env.IMAGE_GHCR }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      # --- Build multi-arch final + push. L'étape amd64 est resservie depuis le cache gha.
+      - name: Build and push (amd64 + arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CADDY_VERSION=${{ steps.version.outputs.caddy }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
