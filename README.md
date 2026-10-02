@@ -12,16 +12,19 @@ sans exposition des ports 80/443).
 ## Mises à jour
 
 Le workflow GitHub Actions vérifie toutes les six heures la dernière release
-stable de Caddy et la dernière version du module DNS Cloudflare. Il compile le
-binaire depuis la release officielle de Caddy avec `xcaddy`, puis le place dans
-les images officielles builder et runtime les plus récentes disponibles. Ainsi,
-si le tag Docker d'une nouvelle release Caddy tarde à paraître, le binaire
-contient quand même cette release ; la couche runtime officielle est remplacée
-par la nouvelle image dès qu'elle est disponible. Les digests des images de base
-sont épinglés et surveillés. Avant publication, le workflow vérifie les
-versions du binaire et du module et valide un Caddyfile. Le workflow peut aussi
-être lancé depuis l'onglet **Actions**, avec une version Caddy précise ou la
-dernière disponible.
+stable de Caddy et la dernière version du module DNS Cloudflare. Il compile un
+binaire Caddy personnalisé avec `xcaddy`, car l'image officielle Caddy ne
+contient pas le module Cloudflare. La version du binaire à compiler est
+indépendante des images officielles `builder` et `runtime` utilisées comme bases.
+Si une image officielle correspondant à une nouvelle release tarde à paraître,
+le workflow compile quand même cette release en utilisant la paire officielle
+`builder`/`runtime` la plus récente disponible. Les digests de ces bases sont
+épinglés et surveillés.
+
+Avant publication, le workflow vérifie les versions du binaire et du module et
+valide un Caddyfile. Le détail des déclenchements, des fallbacks, du marqueur de
+publication et des opérations de maintenance est dans le
+[guide de maintenance](docs/MAINTENANCE.md).
 
 ## Token Cloudflare
 
