@@ -35,10 +35,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Pour un tag manuel, respecte le tag. Sinon, utilise la dernière release
-      # stable officielle de Caddy. Résout également la dernière version Go du
-      # module Cloudflare pour utiliser la même version dans les deux builds.
-      - name: Resolve Caddy version
+      # Pour un tag manuel, respecte le tag. Sinon, choisit la dernière release
+      # stable de Caddy dont les images officielles builder/runtime existent.
+      # Le module Cloudflare est résolu séparément et épinglé pour ce build.
+      - name: Resolve Caddy and Cloudflare versions
         id: version
         env:
           REQUESTED_VERSION: ${{ inputs.caddy_version }}
@@ -48,7 +48,29 @@ jobs:
           elif [[ -n "$REQUESTED_VERSION" ]]; then
             caddy="${REQUESTED_VERSION#v}"
           else
-            caddy="$(curl -fsSL --retry 3 https://api.github.com/repos/caddyserver/caddy/releases/latest | jq -r '.tag_name' | sed 's/^v//')"
+            releases="$(curl -fsSL --retry 3 'https://api.github.com/repos/caddyserver/caddy/releases?per_page=100')"
+            release_versions="$(jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | sub("^v"; "")' <<< "$releases")"
+            latest_release="$(sed -n '1p' <<< "$release_versions")"
+            if [[ -z "$latest_release" ]]; then
+              echo "Aucune release stable de Caddy n'a été trouvée." >&2
+              exit 1
+            fi
+            caddy=""
+            while IFS= read -r candidate; do
+              runtime_status="$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/caddy/tags/${candidate}")"
+              builder_status="$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/caddy/tags/${candidate}-builder")"
+              if [[ "$runtime_status" == "200" && "$builder_status" == "200" ]]; then
+                caddy="$candidate"
+                break
+              fi
+            done <<< "$release_versions"
+            if [[ -z "${caddy:-}" ]]; then
+              echo "Aucune version stable de Caddy ne possède ses deux images officielles." >&2
+              exit 1
+            fi
+            if [[ "$caddy" != "$latest_release" ]]; then
+              echo "La release Caddy ${latest_release} n'est pas encore publiée en images Docker; utilisation de la plus récente disponible: ${caddy}."
+            fi
           fi
           cloudflare="$(curl -fsSL --retry 3 'https://proxy.golang.org/github.com/caddy-dns/cloudflare/@latest' | jq -r '.Version')"
 
@@ -77,22 +99,27 @@ jobs:
           REQUESTED_VERSION: ${{ inputs.caddy_version }}
         run: |
           should_build=true
-          check_base_images=false
+          automatic_release=false
           if [[ "$GITHUB_EVENT_NAME" == "schedule" ]] || [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && -z "$REQUESTED_VERSION" ]]; then
-            check_base_images=true
+            automatic_release=true
             if git ls-remote --exit-code --tags origin "refs/tags/${PUBLISHED_PAIR_TAG}" >/dev/null 2>&1; then
               echo "La paire Caddy ${CADDY_VERSION} / Cloudflare ${CLOUDFLARE_DNS_VERSION} est déjà publiée."
               should_build=false
             fi
           fi
 
-          if [[ "$should_build" == "true" && "$check_base_images" == "true" ]]; then
+          if [[ "$should_build" == "true" ]]; then
             for image_tag in "$CADDY_VERSION" "${CADDY_VERSION}-builder"; do
               http_code="$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/caddy/tags/${image_tag}")"
               if [[ "$http_code" != "200" ]]; then
-                echo "L'image officielle caddy:${image_tag} n'est pas encore publiée (HTTP ${http_code}); une prochaine vérification réessaiera."
-                should_build=false
-                break
+                if [[ "$automatic_release" == "true" ]]; then
+                  echo "L'image officielle caddy:${image_tag} n'est pas encore publiée (HTTP ${http_code}); une prochaine vérification réessaiera."
+                  should_build=false
+                  break
+                else
+                  echo "L'image officielle caddy:${image_tag} n'est pas publiée (HTTP ${http_code})." >&2
+                  exit 1
+                fi
               fi
             done
           fi

@@ -15,9 +15,11 @@ Le workflow GitHub Actions vérifie toutes les six heures la dernière release
 stable de Caddy et la dernière version du module DNS Cloudflare. Si l'une des
 deux change, il compile l'image avec cette paire de versions, puis vérifie le
 binaire, le module et la validité d'un Caddyfile avant de publier sur Docker Hub
-et GHCR. Si les images officielles de base de Caddy ne sont pas encore publiées,
-il attend la prochaine vérification. Le workflow peut aussi être lancé depuis
-l'onglet **Actions**, avec une version Caddy précise ou la dernière release.
+et GHCR. Si les images officielles de base de la dernière release Caddy ne sont
+pas encore publiées, il utilise la release précédente disponible ; il pourra
+ainsi quand même intégrer une mise à jour du module Cloudflare, puis passer à
+Caddy dès que ses images sont publiées. Le workflow peut aussi être lancé depuis
+l'onglet **Actions**, avec une version Caddy précise ou la dernière disponible.
 
 ## Token Cloudflare
 
