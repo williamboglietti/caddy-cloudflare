@@ -35,47 +35,62 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Pour un tag manuel, respecte le tag. Sinon, choisit la dernière release
-      # stable de Caddy dont les images officielles builder/runtime existent.
-      # Le module Cloudflare est résolu séparément et épinglé pour ce build.
+      # La version du binaire suit toujours la dernière release stable de Caddy.
+      # Les images officielles disponibles servent de builder et de runtime;
+      # xcaddy compile la version officielle même si son tag Docker tarde.
       - name: Resolve Caddy and Cloudflare versions
         id: version
         env:
           REQUESTED_VERSION: ${{ inputs.caddy_version }}
         run: |
+          releases="$(curl -fsSL --retry 3 'https://api.github.com/repos/caddyserver/caddy/releases?per_page=100')"
+          release_versions="$(jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | sub("^v"; "")' <<< "$releases")"
+          latest_release="$(sed -n '1p' <<< "$release_versions")"
+
           if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
             caddy="${GITHUB_REF_NAME#v}"
           elif [[ -n "$REQUESTED_VERSION" ]]; then
             caddy="${REQUESTED_VERSION#v}"
           else
-            releases="$(curl -fsSL --retry 3 'https://api.github.com/repos/caddyserver/caddy/releases?per_page=100')"
-            release_versions="$(jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) | sub("^v"; "")' <<< "$releases")"
-            latest_release="$(sed -n '1p' <<< "$release_versions")"
-            if [[ -z "$latest_release" ]]; then
-              echo "Aucune release stable de Caddy n'a été trouvée." >&2
-              exit 1
-            fi
-            caddy=""
-            while IFS= read -r candidate; do
-              runtime_status="$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/caddy/tags/${candidate}")"
-              builder_status="$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/caddy/tags/${candidate}-builder")"
-              if [[ "$runtime_status" == "200" && "$builder_status" == "200" ]]; then
-                caddy="$candidate"
-                break
-              fi
-            done <<< "$release_versions"
-            if [[ -z "${caddy:-}" ]]; then
-              echo "Aucune version stable de Caddy ne possède ses deux images officielles." >&2
-              exit 1
-            fi
-            if [[ "$caddy" != "$latest_release" ]]; then
-              echo "La release Caddy ${latest_release} n'est pas encore publiée en images Docker; utilisation de la plus récente disponible: ${caddy}."
-            fi
+            caddy="$latest_release"
           fi
+
+          if [[ -z "$caddy" ]]; then
+            echo "Aucune release stable de Caddy n'a été trouvée." >&2
+            exit 1
+          fi
+
+          # Le builder/runtime officiel le plus récent reste une base valable
+          # pendant le délai de publication de la nouvelle image officielle.
+          caddy_base=""
+          while IFS= read -r candidate; do
+            runtime_status="$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/caddy/tags/${candidate}")"
+            builder_status="$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/caddy/tags/${candidate}-builder")"
+            if [[ "$runtime_status" == "200" && "$builder_status" == "200" ]]; then
+              caddy_base="$candidate"
+              runtime_info="$(curl -fsSL --retry 3 "https://hub.docker.com/v2/repositories/library/caddy/tags/${candidate}")"
+              builder_info="$(curl -fsSL --retry 3 "https://hub.docker.com/v2/repositories/library/caddy/tags/${candidate}-builder")"
+              runtime_digest="$(jq -r '.digest // empty' <<< "$runtime_info")"
+              builder_digest="$(jq -r '.digest // empty' <<< "$builder_info")"
+              break
+            fi
+          done <<< "$release_versions"
+          if [[ -z "$caddy_base" || ! "$runtime_digest" =~ ^sha256:[0-9a-f]{64}$ || ! "$builder_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "Impossible de trouver les images officielles Caddy builder/runtime et leurs digests." >&2
+            exit 1
+          fi
+          if [[ "$caddy" != "$caddy_base" ]]; then
+            echo "Caddy ${caddy} sera compilé depuis sa release officielle avec le builder officiel ${caddy_base}; l'image runtime officielle ${caddy_base} servira de base."
+          fi
+
           cloudflare="$(curl -fsSL --retry 3 'https://proxy.golang.org/github.com/caddy-dns/cloudflare/@latest' | jq -r '.Version')"
 
           if [[ ! "$caddy" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Version Caddy invalide : $caddy" >&2
+            exit 1
+          fi
+          if [[ ! "$caddy_base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version de l'image officielle Caddy invalide : $caddy_base" >&2
             exit 1
           fi
           if [[ ! "$cloudflare" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
@@ -85,8 +100,13 @@ jobs:
 
           IFS='.' read -r major minor _ <<< "$caddy"
           echo "caddy=$caddy" >> "$GITHUB_OUTPUT"
+          echo "caddy_base=$caddy_base" >> "$GITHUB_OUTPUT"
           echo "cloudflare_dns=$cloudflare" >> "$GITHUB_OUTPUT"
-          echo "published_pair_tag=auto-caddy-${caddy}-cloudflare-${cloudflare}" >> "$GITHUB_OUTPUT"
+          runtime_fingerprint="${runtime_digest#sha256:}"
+          builder_fingerprint="${builder_digest#sha256:}"
+          echo "runtime_digest=$runtime_digest" >> "$GITHUB_OUTPUT"
+          echo "builder_digest=$builder_digest" >> "$GITHUB_OUTPUT"
+          echo "published_pair_tag=auto-caddy-${caddy}-cloudflare-${cloudflare}-base-${caddy_base}-${runtime_fingerprint:0:12}-${builder_fingerprint:0:12}" >> "$GITHUB_OUTPUT"
           echo "major=$major" >> "$GITHUB_OUTPUT"
           echo "major_minor=$major.$minor" >> "$GITHUB_OUTPUT"
 
@@ -108,21 +128,6 @@ jobs:
             fi
           fi
 
-          if [[ "$should_build" == "true" ]]; then
-            for image_tag in "$CADDY_VERSION" "${CADDY_VERSION}-builder"; do
-              http_code="$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/caddy/tags/${image_tag}")"
-              if [[ "$http_code" != "200" ]]; then
-                if [[ "$automatic_release" == "true" ]]; then
-                  echo "L'image officielle caddy:${image_tag} n'est pas encore publiée (HTTP ${http_code}); une prochaine vérification réessaiera."
-                  should_build=false
-                  break
-                else
-                  echo "L'image officielle caddy:${image_tag} n'est pas publiée (HTTP ${http_code})." >&2
-                  exit 1
-                fi
-              fi
-            done
-          fi
           echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
@@ -145,6 +150,8 @@ jobs:
           tags: caddy-cloudflare:smoketest
           build-args: |
             CADDY_VERSION=${{ steps.version.outputs.caddy }}
+            CADDY_BUILDER_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}-builder@${{ steps.version.outputs.builder_digest }}
+            CADDY_RUNTIME_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}@${{ steps.version.outputs.runtime_digest }}
             CLOUDFLARE_DNS_VERSION=${{ steps.version.outputs.cloudflare_dns }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -220,13 +227,15 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CADDY_VERSION=${{ steps.version.outputs.caddy }}
+            CADDY_BUILDER_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}-builder@${{ steps.version.outputs.builder_digest }}
+            CADDY_RUNTIME_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}@${{ steps.version.outputs.runtime_digest }}
             CLOUDFLARE_DNS_VERSION=${{ steps.version.outputs.cloudflare_dns }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # Ce tag mémorise les deux versions publiées. Un changement de Caddy ou du
-      # module Cloudflare produit une nouvelle paire et déclenche un nouveau build.
-      - name: Record the published Caddy and Cloudflare versions
+      # Le marqueur inclut aussi les digests des bases: une mise à jour de
+      # l'image officielle déclenche donc un nouveau build, même à versions égales.
+      - name: Record the published Caddy, Cloudflare, and base images
         if: steps.release.outputs.should_build == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
