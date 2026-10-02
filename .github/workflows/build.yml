@@ -1,11 +1,22 @@
 name: build
 
-# Déclenché par un tag git de version (ex: v2.11.4).
-# Le tag dicte la version de Caddy buildée : v2.11.4 -> CADDY_VERSION=2.11.4.
 on:
   push:
     tags:
       - "v*"
+  # Vérifie toutes les six heures les versions publiées de Caddy et du module DNS.
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      caddy_version:
+        description: "Version Caddy à compiler (vide = dernière version stable)"
+        required: false
+        type: string
+
+concurrency:
+  group: caddy-cloudflare-release
+  cancel-in-progress: false
 
 env:
   IMAGE_DOCKERHUB: williamboglietti/caddy-cloudflare
@@ -15,27 +26,90 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write # nécessaire pour enregistrer le tag de la version publiée
       packages: write # nécessaire pour pousser sur GHCR
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # v2.11.4 -> 2.11.4 (build-arg passé à xcaddy via le Dockerfile)
-      - name: Derive Caddy version from tag
+      # Pour un tag manuel, respecte le tag. Sinon, utilise la dernière release
+      # stable officielle de Caddy. Résout également la dernière version Go du
+      # module Cloudflare pour utiliser la même version dans les deux builds.
+      - name: Resolve Caddy version
         id: version
-        run: echo "caddy=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          REQUESTED_VERSION: ${{ inputs.caddy_version }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            caddy="${GITHUB_REF_NAME#v}"
+          elif [[ -n "$REQUESTED_VERSION" ]]; then
+            caddy="${REQUESTED_VERSION#v}"
+          else
+            caddy="$(curl -fsSL --retry 3 https://api.github.com/repos/caddyserver/caddy/releases/latest | jq -r '.tag_name' | sed 's/^v//')"
+          fi
+          cloudflare="$(curl -fsSL --retry 3 'https://proxy.golang.org/github.com/caddy-dns/cloudflare/@latest' | jq -r '.Version')"
+
+          if [[ ! "$caddy" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version Caddy invalide : $caddy" >&2
+            exit 1
+          fi
+          if [[ ! "$cloudflare" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Version du module Cloudflare invalide : $cloudflare" >&2
+            exit 1
+          fi
+
+          IFS='.' read -r major minor _ <<< "$caddy"
+          echo "caddy=$caddy" >> "$GITHUB_OUTPUT"
+          echo "cloudflare_dns=$cloudflare" >> "$GITHUB_OUTPUT"
+          echo "published_pair_tag=auto-caddy-${caddy}-cloudflare-${cloudflare}" >> "$GITHUB_OUTPUT"
+          echo "major=$major" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$major.$minor" >> "$GITHUB_OUTPUT"
+
+      - name: Skip an already published version pair or pending Docker image
+        id: release
+        env:
+          CADDY_VERSION: ${{ steps.version.outputs.caddy }}
+          CLOUDFLARE_DNS_VERSION: ${{ steps.version.outputs.cloudflare_dns }}
+          PUBLISHED_PAIR_TAG: ${{ steps.version.outputs.published_pair_tag }}
+          REQUESTED_VERSION: ${{ inputs.caddy_version }}
+        run: |
+          should_build=true
+          check_base_images=false
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]] || [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && -z "$REQUESTED_VERSION" ]]; then
+            check_base_images=true
+            if git ls-remote --exit-code --tags origin "refs/tags/${PUBLISHED_PAIR_TAG}" >/dev/null 2>&1; then
+              echo "La paire Caddy ${CADDY_VERSION} / Cloudflare ${CLOUDFLARE_DNS_VERSION} est déjà publiée."
+              should_build=false
+            fi
+          fi
+
+          if [[ "$should_build" == "true" && "$check_base_images" == "true" ]]; then
+            for image_tag in "$CADDY_VERSION" "${CADDY_VERSION}-builder"; do
+              http_code="$(curl --max-time 20 -sS -o /dev/null -w '%{http_code}' "https://hub.docker.com/v2/repositories/library/caddy/tags/${image_tag}")"
+              if [[ "$http_code" != "200" ]]; then
+                echo "L'image officielle caddy:${image_tag} n'est pas encore publiée (HTTP ${http_code}); une prochaine vérification réessaiera."
+                should_build=false
+                break
+              fi
+            done
+          fi
+          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
+        if: steps.release.outputs.should_build == 'true'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
+        if: steps.release.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@v3
 
-      # --- Smoke test : on build amd64 en local et on PROUVE que le module est embarqué.
-      # Si le grep échoue, le job s'arrête ici : rien n'est poussé.
+      # Le build amd64 sert de smoke test ; aucune image n'est publiée avant
+      # d'avoir vérifié le binaire, le module et une configuration Caddyfile.
       - name: Build amd64 for smoke test
+        if: steps.release.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -44,20 +118,50 @@ jobs:
           tags: caddy-cloudflare:smoketest
           build-args: |
             CADDY_VERSION=${{ steps.version.outputs.caddy }}
+            CLOUDFLARE_DNS_VERSION=${{ steps.version.outputs.cloudflare_dns }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Verify cloudflare module is present
-        run: docker run --rm caddy-cloudflare:smoketest caddy list-modules | grep -q dns.providers.cloudflare
+      - name: Verify Caddy version and Cloudflare module
+        if: steps.release.outputs.should_build == 'true'
+        env:
+          CADDY_VERSION: ${{ steps.version.outputs.caddy }}
+          CLOUDFLARE_DNS_VERSION: ${{ steps.version.outputs.cloudflare_dns }}
+        run: |
+          docker run --rm caddy-cloudflare:smoketest caddy version | grep -F "v${CADDY_VERSION}"
+          docker run --rm caddy-cloudflare:smoketest caddy list-modules --versions | grep -Fx "dns.providers.cloudflare ${CLOUDFLARE_DNS_VERSION}"
 
-      # --- Login uniquement après que le smoke test soit passé.
+      - name: Validate a Caddyfile using the Cloudflare DNS provider
+        if: steps.release.outputs.should_build == 'true'
+        run: |
+          cat > "$RUNNER_TEMP/Caddyfile" <<'EOF'
+          example.com {
+              tls {
+                  dns cloudflare {env.CF_API_TOKEN}
+              }
+              respond "ok"
+          }
+          EOF
+          docker run --rm \
+            -v "$RUNNER_TEMP/Caddyfile:/etc/caddy/Caddyfile" \
+            caddy-cloudflare:smoketest \
+            caddy fmt --overwrite /etc/caddy/Caddyfile
+          docker run --rm \
+            -e CF_API_TOKEN=0000000000000000000000000000000000000000 \
+            -v "$RUNNER_TEMP/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy-cloudflare:smoketest \
+            caddy validate --config /etc/caddy/Caddyfile
+
+      # Connexions aux registres seulement après la réussite des smoke tests.
       - name: Login to Docker Hub
+        if: steps.release.outputs.should_build == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to GHCR
+        if: steps.release.outputs.should_build == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -65,6 +169,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Docker metadata
+        if: steps.release.outputs.should_build == 'true'
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -72,13 +177,13 @@ jobs:
             ${{ env.IMAGE_DOCKERHUB }}
             ${{ env.IMAGE_GHCR }}
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
+            type=raw,value=${{ steps.version.outputs.caddy }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}
+            type=raw,value=${{ steps.version.outputs.major }}
             type=raw,value=latest
 
-      # --- Build multi-arch final + push. L'étape amd64 est resservie depuis le cache gha.
       - name: Build and push (amd64 + arm64)
+        if: steps.release.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -88,5 +193,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             CADDY_VERSION=${{ steps.version.outputs.caddy }}
+            CLOUDFLARE_DNS_VERSION=${{ steps.version.outputs.cloudflare_dns }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Ce tag mémorise les deux versions publiées. Un changement de Caddy ou du
+      # module Cloudflare produit une nouvelle paire et déclenche un nouveau build.
+      - name: Record the published Caddy and Cloudflare versions
+        if: steps.release.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISHED_PAIR_TAG: ${{ steps.version.outputs.published_pair_tag }}
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${PUBLISHED_PAIR_TAG}" >/dev/null 2>&1; then
+            echo "Le marqueur ${PUBLISHED_PAIR_TAG} existe déjà."
+          else
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${PUBLISHED_PAIR_TAG}" -f sha="${GITHUB_SHA}"
+          fi
