@@ -45,8 +45,10 @@ flowchart TD
 
 À chaque exécution automatique, le workflow :
 
-1. Lit les releases stables de Caddy sur GitHub. Le code à compiler est la
-   dernière release, sauf si un tag `v*` ou une version manuelle est fourni.
+1. Lit les releases stables de Caddy sur GitHub avec le `GITHUB_TOKEN` du
+   workflow, pour éviter le quota anonyme partagé par les runners. Le code à
+   compiler est la dernière release, sauf si un tag `v*` ou une version manuelle
+   est fourni.
 2. Parcourt les releases de Caddy, de la plus récente à la plus ancienne, et
    cherche une version pour laquelle Docker Hub possède **les deux** tags
    officiels `caddy:<version>` et `caddy:<version>-builder`.
