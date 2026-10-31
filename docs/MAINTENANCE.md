@@ -37,8 +37,9 @@ flowchart TD
     D -- oui --> E[Passer le build automatique]
     D -- non --> F[Compiler Caddy avec xcaddy et Cloudflare]
     F --> G[Smoke tests amd64 et validation du Caddyfile]
-    G --> H[Assembler et publier amd64 et arm64 sur Docker Hub et GHCR]
-    H --> I[Enregistrer le marqueur Git]
+    G --> H[Signaler MEDIUM/LOW et bloquer tout HIGH/CRITICAL]
+    H --> I[Publier amd64 sur Docker Hub et GHCR]
+    I --> J[Enregistrer le marqueur Git]
 ```
 
 ## Sélection des versions et fallback
@@ -112,10 +113,17 @@ Pour une nouvelle paire, le workflow :
 3. formate et valide un Caddyfile avec un faux jeton Cloudflare. Cette étape
    valide la configuration, mais ne fait pas de requête à l'API Cloudflare et
    ne demande pas de certificat ACME ;
-4. seulement après ces contrôles, construit et publie les images `linux/amd64`
-   et `linux/arm64` sur Docker Hub et GHCR ;
-5. publie les tags `<version>`, `<major>.<minor>`, `<major>` et `latest`, puis
+4. signale les vulnérabilités MEDIUM/LOW, puis bloque toute vulnérabilité
+   HIGH/CRITICAL, corrigée ou non ;
+5. si les contrôles et les scans réussissent, pousse la candidate `linux/amd64`
+   et publie cette architecture sur Docker Hub et GHCR, sans rebuild ;
+6. publie les tags `<version>`, `<major>.<minor>`, `<major>` et `latest`, puis
    crée le marqueur Git.
+
+ARM est suspendu : aucune émulation QEMU ni construction ARM ne tourne sur les
+runners actuels. Une réactivation exige un runner ARM natif et une décision
+distincte sur le besoin et le coût. Les anciens tags multiarchitecture restent
+inchangés ; les publications du workflow courant sont limitées à amd64.
 
 Le cache Buildx GitHub Actions est activé. Une nouvelle version de Caddy ou du
 module invalide néanmoins la couche de compilation concernée.
@@ -127,8 +135,8 @@ Pour vérifier une publication :
 1. Ouvrir l'exécution la plus récente dans **Actions → build** et vérifier sa
    conclusion et les versions affichées par l'étape de résolution.
 2. Confirmer que les étapes de contrôle sont réussies avant le push.
-3. Vérifier les manifests `latest` sur Docker Hub et GHCR pour les plateformes
-   amd64 et arm64.
+3. Vérifier que les nouveaux manifests `latest` sur Docker Hub et GHCR servent
+   `linux/amd64`. Les anciens tags peuvent encore contenir arm64.
 4. Tirer l'image amd64 et contrôler le binaire et le module :
 
    ```sh
@@ -144,10 +152,8 @@ du workflow. Une erreur de compilation ou un échec des smoke tests doit
 être corrigé avant de publier ; la connexion aux registres et le push viennent
 après ces contrôles.
 
-Le build multiarchitecture peut être long : le runner GitHub amd64 compile
-également le binaire arm64 sous QEMU. Un build d'environ 24 minutes a réussi le
-2 octobre 2026 ; la compilation arm64 prenait environ 18 minutes. Il s'agissait
-du temps de compilation, pas d'un échec du push.
+Les anciens builds multiarchitecture utilisaient QEMU pour compiler arm64 sur
+un runner amd64. Ce chemin est suspendu dans le workflow courant.
 
 ## État de référence au 2 octobre 2026
 
@@ -164,8 +170,9 @@ source de vérité pour les versions courantes.
   `sha256:0c994536bddb66445885237f1a5dcc1916bccea922661c76b4e9fc24061f9b52`.
 - Digest builder :
   `sha256:369218c81ca6d6af249981221b3a5c764d886dd5b058f51d144066de13f2418d`.
-- L'image personnalisée `2.11.6` a été publiée pour amd64 et arm64 sur Docker
-  Hub et GHCR après réussite des contrôles.
+- L'image personnalisée `2.11.6` a historiquement été publiée pour amd64 et
+  arm64 sur Docker Hub et GHCR après réussite des contrôles. Le workflow courant
+  ne publie désormais que amd64.
 - Exécution réussie : [GitHub Actions run 37008993269](https://github.com/williamboglietti/caddy-cloudflare/actions/runs/37008993269).
 - Le marqueur correspondant est
   `auto-caddy-2.11.6-cloudflare-v0.2.4-base-2.11.4-0c994536bddb-369218c81ca6`.

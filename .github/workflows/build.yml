@@ -150,10 +150,6 @@ jobs:
             type=raw,value=${{ steps.version.outputs.major }}
             type=raw,value=latest
 
-      - name: Set up QEMU
-        if: steps.release.outputs.should_build == 'true'
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Buildx
         if: steps.release.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@v3
@@ -218,45 +214,27 @@ jobs:
           version: v0.75.0
           cache: false
 
-      - name: Bloquer les vulnérabilités HIGH/CRITICAL corrigibles amd64
+      - name: Signaler les vulnérabilités MEDIUM/LOW amd64
         if: steps.release.outputs.should_build == 'true'
         env:
           CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-amd64
-        run: trivy image --platform linux/amd64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$CANDIDATE"
+        run: trivy image --platform linux/amd64 --scanners vuln --vuln-type os,library --severity MEDIUM,LOW --exit-code 0 "$CANDIDATE"
 
-      - name: Build arm64 candidate locally
-        if: steps.release.outputs.should_build == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/arm64
-          load: true
-          pull: true
-          tags: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-arm64
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            CADDY_VERSION=${{ steps.version.outputs.caddy }}
-            CADDY_BUILDER_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}-builder@${{ steps.version.outputs.builder_digest }}
-            CADDY_RUNTIME_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}@${{ steps.version.outputs.runtime_digest }}
-            CLOUDFLARE_DNS_VERSION=${{ steps.version.outputs.cloudflare_dns }}
-          cache-from: type=gha,scope=caddy-cloudflare-linux-arm64
-          cache-to: type=gha,mode=max,scope=caddy-cloudflare-linux-arm64
-
-      - name: Bloquer les vulnérabilités HIGH/CRITICAL corrigibles arm64
+      - name: Bloquer les vulnérabilités HIGH/CRITICAL amd64
         if: steps.release.outputs.should_build == 'true'
         env:
-          CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-arm64
-        run: trivy image --platform linux/arm64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$CANDIDATE"
+          CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+        run: trivy image --platform linux/amd64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --exit-code 1 "$CANDIDATE"
 
-      # Les deux architectures sont publiées uniquement après la réussite des scans.
-      - name: Login to Docker Hub after both scans pass
+      # La candidate amd64 n'est publiée qu'après les smoke tests et les deux scans.
+      - name: Login to Docker Hub after all scans pass
         if: steps.release.outputs.should_build == 'true' && github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Login to GHCR after both scans pass
+      - name: Login to GHCR after all scans pass
         if: steps.release.outputs.should_build == 'true' && github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
@@ -264,7 +242,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push scanned candidates and publish multiarch tags
+      - name: Push scanned amd64 candidate and publish tags
         if: steps.release.outputs.should_build == 'true' && github.event_name != 'pull_request'
         env:
           DOCKERHUB: ${{ env.IMAGE_DOCKERHUB }}
@@ -274,14 +252,10 @@ jobs:
         run: |
           set -euo pipefail
           amd64_local="caddy-cloudflare:scan-$RUN_SUFFIX-amd64"
-          arm64_local="caddy-cloudflare:scan-$RUN_SUFFIX-arm64"
           for registry in "$DOCKERHUB" "$GHCR"; do
             amd64="$registry:candidate-$RUN_SUFFIX-amd64"
-            arm64="$registry:candidate-$RUN_SUFFIX-arm64"
             docker tag "$amd64_local" "$amd64"
-            docker tag "$arm64_local" "$arm64"
             docker push "$amd64"
-            docker push "$arm64"
           done
 
           while IFS= read -r tag; do
@@ -291,9 +265,7 @@ jobs:
               "$GHCR":*) registry="$GHCR" ;;
               *) echo "::error::Tag de registre inattendu : $tag"; exit 1 ;;
             esac
-            docker buildx imagetools create --tag "$tag" \
-              "$registry:candidate-$RUN_SUFFIX-amd64" \
-              "$registry:candidate-$RUN_SUFFIX-arm64"
+            docker buildx imagetools create --tag "$tag" "$registry:candidate-$RUN_SUFFIX-amd64"
           done <<< "$TAGS"
 
       # Le marqueur inclut aussi les digests des bases: une mise à jour de
