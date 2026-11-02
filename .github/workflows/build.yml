@@ -218,6 +218,52 @@ jobs:
           version: v0.75.0
           cache: false
 
+      - name: Rapporter les HIGH/CRITICAL sans correctif (avertissement) amd64
+        if: steps.release.outputs.should_build == 'true'
+        env:
+          CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+        run: trivy image --platform linux/amd64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --format json --output trivy-high.json --exit-code 0 "$CANDIDATE"
+
+      - name: Publier les avertissements HIGH/CRITICAL sans correctif
+        if: steps.release.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          try:
+              with open("trivy-high.json", encoding="utf-8") as handle:
+                  report = json.load(handle)
+          except (OSError, json.JSONDecodeError) as error:
+              print(f"::error::Rapport Trivy illisible : {error}")
+              sys.exit(1)
+
+          rows = set()
+          for result in report.get("Results") or []:
+              for vuln in result.get("Vulnerabilities") or []:
+                  if vuln.get("Severity") in ("HIGH", "CRITICAL") and not vuln.get("FixedVersion"):
+                      rows.add((vuln["Severity"], vuln.get("PkgName", "?"), vuln["VulnerabilityID"], vuln.get("InstalledVersion", "?")))
+          rows = sorted(rows, key=lambda row: (row[0] != "CRITICAL", row[1], row[2]))
+
+          for severity, package, cve, version in rows:
+              print(f"::warning title=HIGH/CRITICAL sans correctif::{cve} ({severity}) dans {package} {version} : aucun correctif disponible")
+
+          lines = [f"### HIGH/CRITICAL sans correctif : {len(rows)}", ""]
+          if rows:
+              lines += ["| Sévérité | Paquet | Version installée | CVE |", "|---|---|---|---|"]
+              lines += [f"| {severity} | {package} | {version} | {cve} |" for severity, package, cve, version in rows]
+          else:
+              lines.append("Aucune.")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("\n".join(lines) + "\n")
+          print(f"{len(rows)} HIGH/CRITICAL sans correctif : avertissement, publication non bloquée.")
+          PY
+
       - name: Bloquer les vulnérabilités HIGH/CRITICAL corrigibles amd64
         if: steps.release.outputs.should_build == 'true'
         env:
@@ -241,6 +287,52 @@ jobs:
             CLOUDFLARE_DNS_VERSION=${{ steps.version.outputs.cloudflare_dns }}
           cache-from: type=gha,scope=caddy-cloudflare-linux-arm64
           cache-to: type=gha,mode=max,scope=caddy-cloudflare-linux-arm64
+
+      - name: Rapporter les HIGH/CRITICAL sans correctif (avertissement) arm64
+        if: steps.release.outputs.should_build == 'true'
+        env:
+          CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-arm64
+        run: trivy image --platform linux/arm64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --format json --output trivy-high.json --exit-code 0 "$CANDIDATE"
+
+      - name: Publier les avertissements HIGH/CRITICAL sans correctif
+        if: steps.release.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          try:
+              with open("trivy-high.json", encoding="utf-8") as handle:
+                  report = json.load(handle)
+          except (OSError, json.JSONDecodeError) as error:
+              print(f"::error::Rapport Trivy illisible : {error}")
+              sys.exit(1)
+
+          rows = set()
+          for result in report.get("Results") or []:
+              for vuln in result.get("Vulnerabilities") or []:
+                  if vuln.get("Severity") in ("HIGH", "CRITICAL") and not vuln.get("FixedVersion"):
+                      rows.add((vuln["Severity"], vuln.get("PkgName", "?"), vuln["VulnerabilityID"], vuln.get("InstalledVersion", "?")))
+          rows = sorted(rows, key=lambda row: (row[0] != "CRITICAL", row[1], row[2]))
+
+          for severity, package, cve, version in rows:
+              print(f"::warning title=HIGH/CRITICAL sans correctif::{cve} ({severity}) dans {package} {version} : aucun correctif disponible")
+
+          lines = [f"### HIGH/CRITICAL sans correctif : {len(rows)}", ""]
+          if rows:
+              lines += ["| Sévérité | Paquet | Version installée | CVE |", "|---|---|---|---|"]
+              lines += [f"| {severity} | {package} | {version} | {cve} |" for severity, package, cve, version in rows]
+          else:
+              lines.append("Aucune.")
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as handle:
+                  handle.write("\n".join(lines) + "\n")
+          print(f"{len(rows)} HIGH/CRITICAL sans correctif : avertissement, publication non bloquée.")
+          PY
 
       - name: Bloquer les vulnérabilités HIGH/CRITICAL corrigibles arm64
         if: steps.release.outputs.should_build == 'true'
