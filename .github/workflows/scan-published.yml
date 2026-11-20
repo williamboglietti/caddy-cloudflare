@@ -1,0 +1,50 @@
+name: Scan published images
+
+on:
+  schedule:
+    - cron: '37 4 * * *'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: Scan ${{ matrix.registry }} / ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        registry: [dockerhub, ghcr]
+        arch: [amd64, arm64]
+        include:
+          - registry: dockerhub
+            image: docker.io/williamboglietti/caddy-cloudflare:latest
+          - registry: ghcr
+            image: ghcr.io/williamboglietti/caddy-cloudflare:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Installer Trivy
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.75.0
+          cache: false
+      - name: Scan the published image
+        env:
+          IMAGE: ${{ matrix.image }}
+          ARCH: ${{ matrix.arch }}
+        run: trivy image --platform "linux/$ARCH" --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --format json --output trivy-published.json --exit-code 0 "$IMAGE"
+      - name: Report findings
+        env:
+          LABEL: ${{ matrix.registry }} / ${{ matrix.arch }}
+        run: python3 scripts/trivy_report.py trivy-published.json --label "$LABEL"
+      - name: Preserve scan report
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-${{ matrix.registry }}-${{ matrix.arch }}
+          path: trivy-published.json
+          if-no-files-found: error
+          retention-days: 30

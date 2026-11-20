@@ -25,7 +25,49 @@ env:
   IMAGE_GHCR: ghcr.io/williamboglietti/caddy-cloudflare
 
 jobs:
+  classify:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check documentation and classify changes
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # After this workflow has landed, use the base branch's policy, so a
+          # PR cannot weaken the classifier and label its own changes as docs.
+          if git cat-file -e "$BASE_SHA:scripts/classify_changes.py" 2>/dev/null; then
+            git show "$BASE_SHA:scripts/classify_changes.py" > "$RUNNER_TEMP/classify_changes.py"
+            python3 "$RUNNER_TEMP/classify_changes.py"
+          else
+            python3 scripts/classify_changes.py
+          fi
+
+  quality:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test CI helpers
+        run: python3 -m unittest discover -s tests -v
+      - name: Check workflow syntax
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.9
+
   build:
+    needs: classify
+    if: always() && (github.event_name != 'pull_request' || (needs.classify.result == 'success' && needs.classify.outputs.scope == 'full'))
     runs-on: ubuntu-latest
     permissions:
       contents: write # nécessaire pour enregistrer le tag de la version publiée
@@ -224,45 +266,9 @@ jobs:
           CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-amd64
         run: trivy image --platform linux/amd64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --format json --output trivy-high.json --exit-code 0 "$CANDIDATE"
 
-      - name: Publier les avertissements HIGH/CRITICAL sans correctif
+      - name: Publier les avertissements HIGH/CRITICAL sans correctif amd64
         if: steps.release.outputs.should_build == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-
-          try:
-              with open("trivy-high.json", encoding="utf-8") as handle:
-                  report = json.load(handle)
-          except (OSError, json.JSONDecodeError) as error:
-              print(f"::error::Rapport Trivy illisible : {error}")
-              sys.exit(1)
-
-          rows = set()
-          for result in report.get("Results") or []:
-              for vuln in result.get("Vulnerabilities") or []:
-                  if vuln.get("Severity") in ("HIGH", "CRITICAL") and not vuln.get("FixedVersion"):
-                      rows.add((vuln["Severity"], vuln.get("PkgName", "?"), vuln["VulnerabilityID"], vuln.get("InstalledVersion", "?")))
-          rows = sorted(rows, key=lambda row: (row[0] != "CRITICAL", row[1], row[2]))
-
-          for severity, package, cve, version in rows:
-              print(f"::warning title=HIGH/CRITICAL sans correctif::{cve} ({severity}) dans {package} {version} : aucun correctif disponible")
-
-          lines = [f"### HIGH/CRITICAL sans correctif : {len(rows)}", ""]
-          if rows:
-              lines += ["| Sévérité | Paquet | Version installée | CVE |", "|---|---|---|---|"]
-              lines += [f"| {severity} | {package} | {version} | {cve} |" for severity, package, cve, version in rows]
-          else:
-              lines.append("Aucune.")
-          summary = os.environ.get("GITHUB_STEP_SUMMARY")
-          if summary:
-              with open(summary, "a", encoding="utf-8") as handle:
-                  handle.write("\n".join(lines) + "\n")
-          print(f"{len(rows)} HIGH/CRITICAL sans correctif : avertissement, publication non bloquée.")
-          PY
+        run: python3 scripts/trivy_report.py trivy-high.json --label 'Candidate amd64' --only-unfixed
 
       - name: Bloquer les vulnérabilités HIGH/CRITICAL corrigibles amd64
         if: steps.release.outputs.should_build == 'true'
@@ -294,45 +300,9 @@ jobs:
           CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-arm64
         run: trivy image --platform linux/arm64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --format json --output trivy-high.json --exit-code 0 "$CANDIDATE"
 
-      - name: Publier les avertissements HIGH/CRITICAL sans correctif
+      - name: Publier les avertissements HIGH/CRITICAL sans correctif arm64
         if: steps.release.outputs.should_build == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import sys
-
-          try:
-              with open("trivy-high.json", encoding="utf-8") as handle:
-                  report = json.load(handle)
-          except (OSError, json.JSONDecodeError) as error:
-              print(f"::error::Rapport Trivy illisible : {error}")
-              sys.exit(1)
-
-          rows = set()
-          for result in report.get("Results") or []:
-              for vuln in result.get("Vulnerabilities") or []:
-                  if vuln.get("Severity") in ("HIGH", "CRITICAL") and not vuln.get("FixedVersion"):
-                      rows.add((vuln["Severity"], vuln.get("PkgName", "?"), vuln["VulnerabilityID"], vuln.get("InstalledVersion", "?")))
-          rows = sorted(rows, key=lambda row: (row[0] != "CRITICAL", row[1], row[2]))
-
-          for severity, package, cve, version in rows:
-              print(f"::warning title=HIGH/CRITICAL sans correctif::{cve} ({severity}) dans {package} {version} : aucun correctif disponible")
-
-          lines = [f"### HIGH/CRITICAL sans correctif : {len(rows)}", ""]
-          if rows:
-              lines += ["| Sévérité | Paquet | Version installée | CVE |", "|---|---|---|---|"]
-              lines += [f"| {severity} | {package} | {version} | {cve} |" for severity, package, cve, version in rows]
-          else:
-              lines.append("Aucune.")
-          summary = os.environ.get("GITHUB_STEP_SUMMARY")
-          if summary:
-              with open(summary, "a", encoding="utf-8") as handle:
-                  handle.write("\n".join(lines) + "\n")
-          print(f"{len(rows)} HIGH/CRITICAL sans correctif : avertissement, publication non bloquée.")
-          PY
+        run: python3 scripts/trivy_report.py trivy-high.json --label 'Candidate arm64' --only-unfixed
 
       - name: Bloquer les vulnérabilités HIGH/CRITICAL corrigibles arm64
         if: steps.release.outputs.should_build == 'true'
@@ -400,4 +370,37 @@ jobs:
             echo "Le marqueur ${PUBLISHED_PAIR_TAG} existe déjà."
           else
             gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="refs/tags/${PUBLISHED_PAIR_TAG}" -f sha="${GITHUB_SHA}"
+          fi
+
+  verify-published-scan:
+    if: github.event_name == 'pull_request' && needs.classify.result == 'success' && needs.classify.outputs.scope == 'full'
+    needs: classify
+    permissions:
+      contents: read
+    uses: ./.github/workflows/scan-published.yml
+
+  ci-complete:
+    name: CI complete
+    if: always() && github.event_name == 'pull_request'
+    needs: [classify, quality, build, verify-published-scan]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require the checks for this change
+        env:
+          CLASSIFY: ${{ needs.classify.result }}
+          SCOPE: ${{ needs.classify.outputs.scope }}
+          QUALITY: ${{ needs.quality.result }}
+          BUILD: ${{ needs.build.result }}
+          PUBLISHED_SCAN: ${{ needs.verify-published-scan.result }}
+        run: |
+          set -euo pipefail
+          [[ "$CLASSIFY" == success && "$QUALITY" == success ]]
+          if [[ "$SCOPE" == docs ]]; then
+            [[ "$BUILD" == skipped && "$PUBLISHED_SCAN" == skipped ]]
+          elif [[ "$SCOPE" == full ]]; then
+            [[ "$BUILD" == success && "$PUBLISHED_SCAN" == success ]]
+          else
+            echo "Périmètre CI invalide : $SCOPE" >&2
+            exit 1
           fi
