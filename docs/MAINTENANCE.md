@@ -177,3 +177,26 @@ source de vérité pour les versions courantes.
 - `Dockerfile` : compilation `xcaddy` et assemblage du runtime.
 - `README.md` : guide d'utilisation de l'image.
 - `docs/MAINTENANCE.md` : ce runbook.
+
+## Surveillance des images publiées et CI
+
+Le workflow `Scan published images` analyse chaque jour à 04 h 37 UTC les tags
+`latest` sur Docker Hub et GHCR, pour `linux/amd64` et `linux/arm64`. Il peut
+également être lancé manuellement. Les résultats HIGH/CRITICAL apparaissent en
+annotations et dans le résumé ; les rapports JSON sont conservés 30 jours en
+artifacts. Les résultats ne modifient ni ne republient les images. Une erreur de
+téléchargement ou d'analyse fait échouer le job. Vérifier régulièrement les
+résumés : les annotations seules ne constituent pas un système d'alerte dédié.
+
+À la construction, les vulnérabilités HIGH/CRITICAL sans correctif sont
+signalées, et celles avec correctif continuent de bloquer la publication.
+L'absence de résultats n'exclut pas une vulnérabilité inconnue ou non détectée.
+Dependabot surveille chaque semaine les références Docker et GitHub Actions ;
+les versions de Caddy, du module et les digests des bases restent surveillés par
+le workflow de construction toutes les six heures.
+
+Le contrôle `CI complete` agrège la classification, les tests des scripts et,
+pour toute modification non exclusivement documentaire, la construction, les
+scans de candidates et le test du workflow de scan des images publiées. Sous
+`docs/`, seules les pièces jointes aux extensions autorisées et les documents
+Markdown non exécutables sont acceptés ; les autres fichiers sont refusés.
