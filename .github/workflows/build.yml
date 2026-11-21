@@ -181,7 +181,7 @@ jobs:
       - name: Docker metadata
         if: steps.release.outputs.should_build == 'true'
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: |
             ${{ env.IMAGE_DOCKERHUB }}
@@ -204,7 +204,7 @@ jobs:
       # d'avoir vérifié le binaire, le module et une configuration Caddyfile.
       - name: Build amd64 for smoke test
         if: steps.release.outputs.should_build == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -278,7 +278,7 @@ jobs:
 
       - name: Build arm64 candidate locally
         if: steps.release.outputs.should_build == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/arm64
