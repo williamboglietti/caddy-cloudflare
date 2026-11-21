@@ -188,8 +188,10 @@ artifacts. Les résultats ne modifient ni ne republient les images. Une erreur d
 téléchargement ou d'analyse fait échouer le job. Vérifier régulièrement les
 résumés : les annotations seules ne constituent pas un système d'alerte dédié.
 
-À la construction, les vulnérabilités HIGH/CRITICAL sans correctif sont
-signalées, et celles avec correctif continuent de bloquer la publication.
+À la construction, Trivy analyse les candidates amd64 et arm64. Toute
+vulnérabilité HIGH/CRITICAL bloque la publication, avec ou sans correctif. Les
+résultats MEDIUM/LOW sont signalés, et un échec sur une architecture laisse
+l'analyse de l'autre se poursuivre.
 L'absence de résultats n'exclut pas une vulnérabilité inconnue ou non détectée.
 Dependabot surveille chaque semaine les références Docker et GitHub Actions ;
 les versions de Caddy, du module et les digests des bases restent surveillés par

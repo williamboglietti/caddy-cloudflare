@@ -260,22 +260,6 @@ jobs:
           version: v0.75.0
           cache: false
 
-      - name: Rapporter les HIGH/CRITICAL sans correctif (avertissement) amd64
-        if: steps.release.outputs.should_build == 'true'
-        env:
-          CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-amd64
-        run: trivy image --platform linux/amd64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --format json --output trivy-high.json --exit-code 0 "$CANDIDATE"
-
-      - name: Publier les avertissements HIGH/CRITICAL sans correctif amd64
-        if: steps.release.outputs.should_build == 'true'
-        run: python3 scripts/trivy_report.py trivy-high.json --label 'Candidate amd64' --only-unfixed
-
-      - name: Bloquer les vulnérabilités HIGH/CRITICAL corrigibles amd64
-        if: steps.release.outputs.should_build == 'true'
-        env:
-          CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-amd64
-        run: trivy image --platform linux/amd64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$CANDIDATE"
-
       - name: Build arm64 candidate locally
         if: steps.release.outputs.should_build == 'true'
         uses: docker/build-push-action@v7
@@ -294,21 +278,11 @@ jobs:
           cache-from: type=gha,scope=caddy-cloudflare-linux-arm64
           cache-to: type=gha,mode=max,scope=caddy-cloudflare-linux-arm64
 
-      - name: Rapporter les HIGH/CRITICAL sans correctif (avertissement) arm64
+      - name: Scanner les candidates amd64 et arm64 avec Trivy
         if: steps.release.outputs.should_build == 'true'
         env:
-          CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-arm64
-        run: trivy image --platform linux/arm64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --format json --output trivy-high.json --exit-code 0 "$CANDIDATE"
-
-      - name: Publier les avertissements HIGH/CRITICAL sans correctif arm64
-        if: steps.release.outputs.should_build == 'true'
-        run: python3 scripts/trivy_report.py trivy-high.json --label 'Candidate arm64' --only-unfixed
-
-      - name: Bloquer les vulnérabilités HIGH/CRITICAL corrigibles arm64
-        if: steps.release.outputs.should_build == 'true'
-        env:
-          CANDIDATE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-arm64
-        run: trivy image --platform linux/arm64 --scanners vuln --vuln-type os,library --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$CANDIDATE"
+          RUN_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/scan_candidates.sh "$RUN_SUFFIX"
 
       # Les deux architectures sont publiées uniquement après la réussite des scans.
       - name: Login to Docker Hub after both scans pass

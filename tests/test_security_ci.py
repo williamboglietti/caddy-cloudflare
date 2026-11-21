@@ -1,4 +1,7 @@
 import importlib.util
+import os
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -52,6 +55,42 @@ class TrivyReportTests(unittest.TestCase):
         self.assertIsNotNone(report, "Trivy report must exist")
         with self.assertRaises(ValueError):
             report.findings({}, only_unfixed=False)
+
+
+class CandidateScanTests(unittest.TestCase):
+    def test_both_architectures_are_scanned_even_when_one_blocks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trivy = Path(directory) / "trivy"
+            trivy.write_text(r"""#!/bin/sh
+printf '%s\n' "$*"
+case " $* " in
+    *" --platform $FAIL_PLATFORM "*" --exit-code 1 "*) exit 1 ;;
+esac
+""")
+            trivy.chmod(0o755)
+
+            for platform in ("", "linux/amd64", "linux/arm64"):
+                with self.subTest(failure=platform):
+                    result = subprocess.run(
+                        ["bash", str(ROOT / "scripts/scan_candidates.sh"), "123-1"],
+                        env={
+                            **os.environ,
+                            "PATH": f"{directory}:{os.environ['PATH']}",
+                            "FAIL_PLATFORM": platform,
+                        },
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertEqual(result.returncode, int(bool(platform)), result.stderr)
+                    expected = []
+                    for arch in ("amd64", "arm64"):
+                        prefix = f"image --platform linux/{arch} --scanners vuln --vuln-type os,library"
+                        image = f"caddy-cloudflare:scan-123-1-{arch}"
+                        expected.extend((
+                            f"{prefix} --severity MEDIUM,LOW --exit-code 0 {image}",
+                            f"{prefix} --severity HIGH,CRITICAL --exit-code 1 {image}",
+                        ))
+                    self.assertEqual(result.stdout.splitlines(), expected)
 
 
 if __name__ == "__main__":

@@ -22,8 +22,8 @@ le workflow compile quand même cette release en utilisant la paire officielle
 épinglés et surveillés.
 
 Avant publication, le workflow vérifie les versions du binaire et du module et
-valide un Caddyfile. Trivy analyse les deux architectures et bloque les
-vulnérabilités HIGH/CRITICAL corrigibles ; celles sans correctif sont signalées.
+valide un Caddyfile. Sur les deux architectures, Trivy bloque toute vulnérabilité
+HIGH/CRITICAL, avec ou sans correctif, et signale les MEDIUM/LOW sans bloquer.
 Un scan quotidien indépendant contrôle également les images `latest` déjà
 publiées sur Docker Hub et GHCR, avec résultats dans les résumés et rapports
 GitHub Actions. Le détail des déclenchements, des fallbacks, du marqueur de
