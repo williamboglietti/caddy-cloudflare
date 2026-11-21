@@ -6,9 +6,7 @@ le challenge ACME **DNS-01** via l'API Cloudflare (certificats wildcard, domaine
 sans exposition des ports 80/443).
 
 - **Image** : `williamboglietti/caddy-cloudflare` (Docker Hub) et `ghcr.io/williamboglietti/caddy-cloudflare` (GHCR)
-- **Architecture actuellement publiée** : `linux/amd64` uniquement. ARM est
-  suspendu ; sa réactivation demandera un runner ARM natif et une décision
-  distincte sur le besoin et le coût.
+- **Architectures** : `linux/amd64`, `linux/arm64`
 - **Tags** : `latest`, plus la version Caddy (`<version>`, `<major>.<minor>`, `<major>`)
 
 ## Mises à jour
@@ -23,10 +21,13 @@ le workflow compile quand même cette release en utilisant la paire officielle
 `builder`/`runtime` la plus récente disponible. Les digests de ces bases sont
 épinglés et surveillés.
 
-Avant publication, le workflow vérifie les versions du binaire et du module,
-valide un Caddyfile et applique Trivy : HIGH/CRITICAL bloquent, corrigés ou non ;
-MEDIUM/LOW sont signalés sans bloquer. Seule l'image amd64 est construite. Le
-détail des déclenchements, des fallbacks, du marqueur de publication et des opérations de maintenance est dans le
+Avant publication, le workflow vérifie les versions du binaire et du module et
+valide un Caddyfile. Sur les deux architectures, Trivy bloque toute vulnérabilité
+HIGH/CRITICAL, avec ou sans correctif, et signale les MEDIUM/LOW sans bloquer.
+Un scan quotidien indépendant contrôle également les images `latest` déjà
+publiées sur Docker Hub et GHCR, avec résultats dans les résumés et rapports
+GitHub Actions. Le détail des déclenchements, des fallbacks, du marqueur de
+publication et des opérations de maintenance est dans le
 [guide de maintenance](docs/MAINTENANCE.md).
 
 ## Token Cloudflare
