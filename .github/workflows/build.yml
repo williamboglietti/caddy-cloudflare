@@ -221,7 +221,7 @@ jobs:
             cache_scope: buildkit
           - arch: arm64
             runner: ubuntu-24.04-arm
-            cache_scope: caddy-cloudflare-linux-arm64
+            cache_scope: caddy-cloudflare-linux-arm64-native
     env:
       ARCH: ${{ matrix.arch }}
       CANDIDATE_SUFFIX: ${{ needs.prepare.outputs.candidate_suffix }}
