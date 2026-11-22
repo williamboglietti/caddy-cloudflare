@@ -35,9 +35,9 @@ flowchart TD
     B --> C[Chercher la paire officielle builder et runtime la plus récente]
     C --> D{Marqueur versions et digests déjà présent ?}
     D -- oui --> E[Passer le build automatique]
-    D -- non --> F[Compiler Caddy avec xcaddy et Cloudflare]
-    F --> G[Smoke tests amd64 et validation du Caddyfile]
-    G --> H[Assembler et publier amd64 et arm64 sur Docker Hub et GHCR]
+    D -- non --> F[Compiler sur les runners natifs amd64 et arm64]
+    F --> G[Tester le binaire et le Caddyfile et scanner chaque image]
+    G --> H[Vérifier les deux images et publier le manifeste sur Docker Hub et GHCR]
     H --> I[Enregistrer le marqueur Git]
 ```
 
@@ -106,16 +106,16 @@ Un tag Git `v*` déclenche le workflow sans appliquer le saut anti-doublon.
 
 Pour une nouvelle paire, le workflow :
 
-1. construit l'image amd64 de contrôle ;
-2. vérifie la sortie de `caddy version` et la présence exacte de
-   `dns.providers.cloudflare <version>` ;
-3. formate et valide un Caddyfile avec un faux jeton Cloudflare. Cette étape
-   valide la configuration, mais ne fait pas de requête à l'API Cloudflare et
-   ne demande pas de certificat ACME ;
-4. seulement après ces contrôles, construit et publie les images `linux/amd64`
-   et `linux/arm64` sur Docker Hub et GHCR ;
-5. publie les tags `<version>`, `<major>.<minor>`, `<major>` et `latest`, puis
-   crée le marqueur Git.
+1. compile en parallèle sur les runners GitHub standards `ubuntu-latest`
+   (amd64) et `ubuntu-24.04-arm` (arm64) ;
+2. vérifie sur chaque architecture la sortie de `caddy version`, la présence de
+   `dns.providers.cloudflare <version>` et la validité d'un Caddyfile utilisant
+   un faux jeton Cloudflare ;
+3. scanne chaque image avec Trivy et transmet les images validées sous forme
+   d'artefacts conservés trois jours ;
+4. charge les deux images et vérifie leurs plateformes. Sur une exécution de
+   publication, pousse ces images sur Docker Hub et GHCR, puis publie les tags
+   `<version>`, `<major>.<minor>`, `<major>` et `latest` et crée le marqueur Git.
 
 Le cache Buildx GitHub Actions est activé. Une nouvelle version de Caddy ou du
 module invalide néanmoins la couche de compilation concernée.
@@ -144,10 +144,9 @@ du workflow. Une erreur de compilation ou un échec des smoke tests doit
 être corrigé avant de publier ; la connexion aux registres et le push viennent
 après ces contrôles.
 
-Le build multiarchitecture peut être long : le runner GitHub amd64 compile
-également le binaire arm64 sous QEMU. Un build d'environ 24 minutes a réussi le
-2 octobre 2026 ; la compilation arm64 prenait environ 18 minutes. Il s'agissait
-du temps de compilation, pas d'un échec du push.
+Les journaux `Build and scan (amd64)` et `Build and scan (arm64)` donnent la
+durée et le résultat pour chaque architecture. Si les artefacts ont expiré,
+relancer tous les jobs permet de reconstruire les deux images.
 
 ## État de référence au 2 octobre 2026
 

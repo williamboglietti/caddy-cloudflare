@@ -65,19 +65,29 @@ jobs:
       - name: Check workflow syntax
         run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.9
 
-  build:
+  prepare:
     needs: classify
     if: always() && (github.event_name != 'pull_request' || (needs.classify.result == 'success' && needs.classify.outputs.scope == 'full'))
     runs-on: ubuntu-latest
     permissions:
-      contents: write # nécessaire pour enregistrer le tag de la version publiée
-      packages: write # nécessaire pour pousser sur GHCR
+      contents: read
+    outputs:
+      should_build: ${{ steps.release.outputs.should_build }}
+      candidate_suffix: ${{ steps.release.outputs.candidate_suffix }}
+      caddy: ${{ steps.version.outputs.caddy }}
+      caddy_base: ${{ steps.version.outputs.caddy_base }}
+      cloudflare_dns: ${{ steps.version.outputs.cloudflare_dns }}
+      builder_digest: ${{ steps.version.outputs.builder_digest }}
+      runtime_digest: ${{ steps.version.outputs.runtime_digest }}
+      published_pair_tag: ${{ steps.version.outputs.published_pair_tag }}
+      labels: ${{ steps.meta.outputs.labels }}
+      tags: ${{ steps.meta.outputs.tags }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          persist-credentials: false
 
       # La version du binaire suit toujours la dernière release stable de Caddy.
       # Les images officielles disponibles servent de builder et de runtime;
@@ -176,7 +186,10 @@ jobs:
             fi
           fi
 
-          echo "should_build=$should_build" >> "$GITHUB_OUTPUT"
+          {
+            echo "should_build=$should_build"
+            echo "candidate_suffix=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Docker metadata
         if: steps.release.outputs.should_build == 'true'
@@ -192,48 +205,62 @@ jobs:
             type=raw,value=${{ steps.version.outputs.major }}
             type=raw,value=latest
 
-      - name: Set up QEMU
-        if: steps.release.outputs.should_build == 'true'
-        uses: docker/setup-qemu-action@v4
+  build:
+    name: Build and scan (${{ matrix.arch }})
+    needs: prepare
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.prepare.outputs.should_build == 'true' }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+            cache_scope: buildkit
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            cache_scope: caddy-cloudflare-linux-arm64
+    env:
+      ARCH: ${{ matrix.arch }}
+      CANDIDATE_SUFFIX: ${{ needs.prepare.outputs.candidate_suffix }}
+      CANDIDATE_IMAGE: caddy-cloudflare:scan-${{ needs.prepare.outputs.candidate_suffix }}-${{ matrix.arch }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Set up Buildx
-        if: steps.release.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@v3
 
-      # Le build amd64 sert de smoke test ; aucune image n'est publiée avant
-      # d'avoir vérifié le binaire, le module et une configuration Caddyfile.
-      - name: Build amd64 for smoke test
-        if: steps.release.outputs.should_build == 'true'
+      - name: Build candidate on native runner
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           pull: true
-          tags: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-amd64
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ env.CANDIDATE_IMAGE }}
+          labels: ${{ needs.prepare.outputs.labels }}
           build-args: |
-            CADDY_VERSION=${{ steps.version.outputs.caddy }}
-            CADDY_BUILDER_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}-builder@${{ steps.version.outputs.builder_digest }}
-            CADDY_RUNTIME_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}@${{ steps.version.outputs.runtime_digest }}
-            CLOUDFLARE_DNS_VERSION=${{ steps.version.outputs.cloudflare_dns }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            CADDY_VERSION=${{ needs.prepare.outputs.caddy }}
+            CADDY_BUILDER_IMAGE=caddy:${{ needs.prepare.outputs.caddy_base }}-builder@${{ needs.prepare.outputs.builder_digest }}
+            CADDY_RUNTIME_IMAGE=caddy:${{ needs.prepare.outputs.caddy_base }}@${{ needs.prepare.outputs.runtime_digest }}
+            CLOUDFLARE_DNS_VERSION=${{ needs.prepare.outputs.cloudflare_dns }}
+          cache-from: type=gha,scope=${{ matrix.cache_scope }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.cache_scope }}
 
       - name: Verify Caddy version and Cloudflare module
-        if: steps.release.outputs.should_build == 'true'
         env:
-          CADDY_VERSION: ${{ steps.version.outputs.caddy }}
-          CLOUDFLARE_DNS_VERSION: ${{ steps.version.outputs.cloudflare_dns }}
-          SMOKE_IMAGE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+          CADDY_VERSION: ${{ needs.prepare.outputs.caddy }}
+          CLOUDFLARE_DNS_VERSION: ${{ needs.prepare.outputs.cloudflare_dns }}
         run: |
-          docker run --rm "$SMOKE_IMAGE" caddy version | grep -F "v${CADDY_VERSION}"
-          docker run --rm "$SMOKE_IMAGE" caddy list-modules --versions | grep -Fx "dns.providers.cloudflare ${CLOUDFLARE_DNS_VERSION}"
+          docker run --rm "$CANDIDATE_IMAGE" caddy version | grep -F "v${CADDY_VERSION}"
+          docker run --rm "$CANDIDATE_IMAGE" caddy list-modules --versions | grep -Fx "dns.providers.cloudflare ${CLOUDFLARE_DNS_VERSION}"
 
       - name: Validate a Caddyfile using the Cloudflare DNS provider
-        if: steps.release.outputs.should_build == 'true'
-        env:
-          SMOKE_IMAGE: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-amd64
         run: |
           cat > "$RUNNER_TEMP/Caddyfile" <<'EOF'
           example.com {
@@ -245,55 +272,83 @@ jobs:
           EOF
           docker run --rm \
             -v "$RUNNER_TEMP/Caddyfile:/etc/caddy/Caddyfile" \
-            "$SMOKE_IMAGE" \
+            "$CANDIDATE_IMAGE" \
             caddy fmt --overwrite /etc/caddy/Caddyfile
           docker run --rm \
             -e CF_API_TOKEN=0000000000000000000000000000000000000000 \
             -v "$RUNNER_TEMP/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            "$SMOKE_IMAGE" \
+            "$CANDIDATE_IMAGE" \
             caddy validate --config /etc/caddy/Caddyfile
 
       - name: Installer Trivy
-        if: steps.release.outputs.should_build == 'true'
         uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
         with:
           version: v0.75.0
           cache: false
 
-      - name: Build arm64 candidate locally
-        if: steps.release.outputs.should_build == 'true'
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/arm64
-          load: true
-          pull: true
-          tags: caddy-cloudflare:scan-${{ github.run_id }}-${{ github.run_attempt }}-arm64
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            CADDY_VERSION=${{ steps.version.outputs.caddy }}
-            CADDY_BUILDER_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}-builder@${{ steps.version.outputs.builder_digest }}
-            CADDY_RUNTIME_IMAGE=caddy:${{ steps.version.outputs.caddy_base }}@${{ steps.version.outputs.runtime_digest }}
-            CLOUDFLARE_DNS_VERSION=${{ steps.version.outputs.cloudflare_dns }}
-          cache-from: type=gha,scope=caddy-cloudflare-linux-arm64
-          cache-to: type=gha,mode=max,scope=caddy-cloudflare-linux-arm64
+      - name: Scan the candidate with Trivy
+        run: bash scripts/scan_candidates.sh "$CANDIDATE_SUFFIX" "$ARCH"
 
-      - name: Scanner les candidates amd64 et arm64 avec Trivy
-        if: steps.release.outputs.should_build == 'true'
-        env:
-          RUN_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
-        run: bash scripts/scan_candidates.sh "$RUN_SUFFIX"
+      - name: Export the scanned candidate
+        run: docker save --output "$RUNNER_TEMP/candidate-$ARCH.tar" "$CANDIDATE_IMAGE"
+
+      - name: Preserve the scanned candidate for assembly
+        uses: actions/upload-artifact@v7
+        with:
+          name: candidate-${{ env.CANDIDATE_SUFFIX }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/candidate-${{ matrix.arch }}.tar
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
+          compression-level: 1
+
+  assemble:
+    name: Verify candidates and publish on release events
+    needs: [prepare, build]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    env:
+      CANDIDATE_SUFFIX: ${{ needs.prepare.outputs.candidate_suffix }}
+
+    steps:
+      - name: Download the scanned candidates
+        uses: actions/download-artifact@v8
+        with:
+          pattern: candidate-${{ env.CANDIDATE_SUFFIX }}-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/candidates
+
+      - name: Load and verify both candidates
+        shell: bash
+        run: |
+          for arch in amd64 arm64; do
+            docker load --input "$RUNNER_TEMP/candidates/candidate-$arch.tar"
+            platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "caddy-cloudflare:scan-$CANDIDATE_SUFFIX-$arch")"
+            [[ "$platform" == "linux/$arch" ]]
+          done
+
+      - uses: actions/checkout@v7
+        if: github.event_name != 'pull_request'
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        if: github.event_name != 'pull_request'
+        uses: docker/setup-buildx-action@v3
 
       # Les deux architectures sont publiées uniquement après la réussite des scans.
       - name: Login to Docker Hub after both scans pass
-        if: steps.release.outputs.should_build == 'true' && github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Login to GHCR after both scans pass
-        if: steps.release.outputs.should_build == 'true' && github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -301,16 +356,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push scanned candidates and publish multiarch tags
-        if: steps.release.outputs.should_build == 'true' && github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request'
         env:
           DOCKERHUB: ${{ env.IMAGE_DOCKERHUB }}
           GHCR: ${{ env.IMAGE_GHCR }}
-          TAGS: ${{ steps.meta.outputs.tags }}
+          TAGS: ${{ needs.prepare.outputs.tags }}
           RUN_SUFFIX: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          amd64_local="caddy-cloudflare:scan-$RUN_SUFFIX-amd64"
-          arm64_local="caddy-cloudflare:scan-$RUN_SUFFIX-arm64"
+          amd64_local="caddy-cloudflare:scan-$CANDIDATE_SUFFIX-amd64"
+          arm64_local="caddy-cloudflare:scan-$CANDIDATE_SUFFIX-arm64"
           for registry in "$DOCKERHUB" "$GHCR"; do
             amd64="$registry:candidate-$RUN_SUFFIX-amd64"
             arm64="$registry:candidate-$RUN_SUFFIX-arm64"
@@ -335,10 +390,10 @@ jobs:
       # Le marqueur inclut aussi les digests des bases: une mise à jour de
       # l'image officielle déclenche donc un nouveau build, même à versions égales.
       - name: Record the published Caddy, Cloudflare, and base images
-        if: steps.release.outputs.should_build == 'true' && github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PUBLISHED_PAIR_TAG: ${{ steps.version.outputs.published_pair_tag }}
+          PUBLISHED_PAIR_TAG: ${{ needs.prepare.outputs.published_pair_tag }}
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/${PUBLISHED_PAIR_TAG}" >/dev/null 2>&1; then
             echo "Le marqueur ${PUBLISHED_PAIR_TAG} existe déjà."
@@ -356,7 +411,7 @@ jobs:
   ci-complete:
     name: CI complete
     if: always() && github.event_name == 'pull_request'
-    needs: [classify, quality, build, verify-published-scan]
+    needs: [classify, quality, prepare, build, assemble, verify-published-scan]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -365,15 +420,17 @@ jobs:
           CLASSIFY: ${{ needs.classify.result }}
           SCOPE: ${{ needs.classify.outputs.scope }}
           QUALITY: ${{ needs.quality.result }}
+          PREPARE: ${{ needs.prepare.result }}
           BUILD: ${{ needs.build.result }}
+          ASSEMBLE: ${{ needs.assemble.result }}
           PUBLISHED_SCAN: ${{ needs.verify-published-scan.result }}
         run: |
           set -euo pipefail
           [[ "$CLASSIFY" == success && "$QUALITY" == success ]]
           if [[ "$SCOPE" == docs ]]; then
-            [[ "$BUILD" == skipped && "$PUBLISHED_SCAN" == skipped ]]
+            [[ "$PREPARE" == skipped && "$BUILD" == skipped && "$ASSEMBLE" == skipped && "$PUBLISHED_SCAN" == skipped ]]
           elif [[ "$SCOPE" == full ]]; then
-            [[ "$BUILD" == success && "$PUBLISHED_SCAN" == success ]]
+            [[ "$PREPARE" == success && "$BUILD" == success && "$ASSEMBLE" == success && "$PUBLISHED_SCAN" == success ]]
           else
             echo "Périmètre CI invalide : $SCOPE" >&2
             exit 1

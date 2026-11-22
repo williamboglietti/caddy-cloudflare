@@ -58,7 +58,7 @@ class TrivyReportTests(unittest.TestCase):
 
 
 class CandidateScanTests(unittest.TestCase):
-    def test_both_architectures_are_scanned_even_when_one_blocks(self):
+    def test_scan_selection_and_blocking_status(self):
         with tempfile.TemporaryDirectory() as directory:
             trivy = Path(directory) / "trivy"
             trivy.write_text(r"""#!/bin/sh
@@ -69,28 +69,34 @@ esac
 """)
             trivy.chmod(0o755)
 
-            for platform in ("", "linux/amd64", "linux/arm64"):
-                with self.subTest(failure=platform):
-                    result = subprocess.run(
-                        ["bash", str(ROOT / "scripts/scan_candidates.sh"), "123-1"],
-                        env={
-                            **os.environ,
-                            "PATH": f"{directory}:{os.environ['PATH']}",
-                            "FAIL_PLATFORM": platform,
-                        },
-                        capture_output=True,
-                        text=True,
-                    )
-                    self.assertEqual(result.returncode, int(bool(platform)), result.stderr)
-                    expected = []
-                    for arch in ("amd64", "arm64"):
-                        prefix = f"image --platform linux/{arch} --scanners vuln --vuln-type os,library"
-                        image = f"caddy-cloudflare:scan-123-1-{arch}"
-                        expected.extend((
-                            f"{prefix} --severity MEDIUM,LOW --exit-code 0 {image}",
-                            f"{prefix} --severity HIGH,CRITICAL --exit-code 1 {image}",
-                        ))
-                    self.assertEqual(result.stdout.splitlines(), expected)
+            for selected in (None, "amd64", "arm64"):
+                architectures = (selected,) if selected else ("amd64", "arm64")
+                command = ["bash", str(ROOT / "scripts/scan_candidates.sh"), "123-1"]
+                if selected:
+                    command.append(selected)
+                for platform in ("", "linux/amd64", "linux/arm64"):
+                    with self.subTest(selected=selected, failure=platform):
+                        result = subprocess.run(
+                            command,
+                            env={
+                                **os.environ,
+                                "PATH": f"{directory}:{os.environ['PATH']}",
+                                "FAIL_PLATFORM": platform,
+                            },
+                            capture_output=True,
+                            text=True,
+                        )
+                        should_block = any(platform == f"linux/{arch}" for arch in architectures)
+                        self.assertEqual(result.returncode, int(should_block), result.stderr)
+                        expected = []
+                        for arch in architectures:
+                            prefix = f"image --platform linux/{arch} --scanners vuln --vuln-type os,library"
+                            image = f"caddy-cloudflare:scan-123-1-{arch}"
+                            expected.extend((
+                                f"{prefix} --severity MEDIUM,LOW --exit-code 0 {image}",
+                                f"{prefix} --severity HIGH,CRITICAL --exit-code 1 {image}",
+                            ))
+                        self.assertEqual(result.stdout.splitlines(), expected)
 
 
 if __name__ == "__main__":
