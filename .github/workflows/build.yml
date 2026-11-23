@@ -5,7 +5,7 @@ on:
     tags:
       - "v*"
   pull_request:
-    branches: [main]
+    branches: [dev, main]
   # Vérifie toutes les six heures les versions publiées de Caddy et du module DNS.
   schedule:
     - cron: "17 */6 * * *"
@@ -17,8 +17,8 @@ on:
         type: string
 
 concurrency:
-  group: caddy-cloudflare-release
-  cancel-in-progress: false
+  group: ${{ github.event_name == 'pull_request' && github.base_ref == 'dev' && format('caddy-dev-pr-{0}', github.event.pull_request.number) || 'caddy-cloudflare-release' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.base_ref == 'dev' }}
 
 env:
   IMAGE_DOCKERHUB: williamboglietti/caddy-cloudflare
@@ -67,7 +67,7 @@ jobs:
 
   prepare:
     needs: classify
-    if: always() && (github.event_name != 'pull_request' || (needs.classify.result == 'success' && needs.classify.outputs.scope == 'full'))
+    if: always() && (github.event_name != 'pull_request' || (github.base_ref != 'dev' && needs.classify.result == 'success' && needs.classify.outputs.scope == 'full'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -402,7 +402,7 @@ jobs:
           fi
 
   verify-published-scan:
-    if: github.event_name == 'pull_request' && needs.classify.result == 'success' && needs.classify.outputs.scope == 'full'
+    if: github.event_name == 'pull_request' && github.base_ref != 'dev' && needs.classify.result == 'success' && needs.classify.outputs.scope == 'full'
     needs: classify
     permissions:
       contents: read
@@ -420,6 +420,7 @@ jobs:
           CLASSIFY: ${{ needs.classify.result }}
           SCOPE: ${{ needs.classify.outputs.scope }}
           QUALITY: ${{ needs.quality.result }}
+          QUICK: ${{ github.event_name == 'pull_request' && github.base_ref == 'dev' }}
           PREPARE: ${{ needs.prepare.result }}
           BUILD: ${{ needs.build.result }}
           ASSEMBLE: ${{ needs.assemble.result }}
@@ -427,7 +428,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$CLASSIFY" == success && "$QUALITY" == success ]]
-          if [[ "$SCOPE" == docs ]]; then
+          if [[ "$SCOPE" == docs || ( "$SCOPE" == full && "$QUICK" == true ) ]]; then
             [[ "$PREPARE" == skipped && "$BUILD" == skipped && "$ASSEMBLE" == skipped && "$PUBLISHED_SCAN" == skipped ]]
           elif [[ "$SCOPE" == full ]]; then
             [[ "$PREPARE" == success && "$BUILD" == success && "$ASSEMBLE" == success && "$PUBLISHED_SCAN" == success ]]
