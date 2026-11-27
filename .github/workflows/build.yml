@@ -233,7 +233,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build candidate on native runner
         uses: docker/build-push-action@v7
@@ -337,7 +337,7 @@ jobs:
 
       - name: Set up Buildx
         if: github.event_name != 'pull_request'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Les deux architectures sont publiées uniquement après la réussite des scans.
       - name: Login to Docker Hub after both scans pass
